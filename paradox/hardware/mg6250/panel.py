@@ -69,6 +69,7 @@ LOGIN_STATUS = {
     0x84: "rejected: bad PW_BLOCK credential",
     0x85: "busy (previous session still open)",
 }
+LOGIN_BUSY = (0x05, 0x85)
 
 # PW_BLOCK = header | client field(8) | len(pw) | credential(32) | trailer
 PW_HEADER = bytes.fromhex("5a0101")
@@ -219,8 +220,8 @@ ZONE_DEFINITIONS = {
 CLOCK_FIELDS = (0, 1, 2, 3)  # BabyWare's selection; field 1 is the date
 CLOCK_FIELD_DATE = 1  # century, year, month, day, hour, minute
 # battery | AC | unknown, one byte each. BabyWare showed Battery 5.3 V and AC
-# 0.0 for 42 00 0c: 0.08 V per step (20.4 V full scale) fits, but rests on
-# that one reading.
+# 0.0 for 42 00 0c: 0.08 V per step (20.4 V full scale). The AC byte uses the
+# same scale: 0x5f = 7.6 V on mains with the 7.5 V adapter (2026-11-04).
 CLOCK_FIELD_POWER = 2
 VOLTS_PER_STEP = 0.08
 SYSTEM_FIELDS = (0, 1)  # what BabyWare polls every 20 s
@@ -562,6 +563,11 @@ class Panel(PanelBase):
             status[0],
             LOGIN_STATUS.get(status[0], "unknown"),
         )
+        if status[0] in LOGIN_BUSY:
+            # The panel keeps the last session (PAI, BabyWare) open until it
+            # times out: not fatal, the main loop retries.
+            logger.warning("MG6250 login: panel busy, will retry")
+            return False
         if status != b"\x00":
             raise AuthenticationFailed(
                 LOGIN_STATUS.get(status[0], f"status 0x{status[0]:02x}")
@@ -778,6 +784,9 @@ class Panel(PanelBase):
                 status == CONTROL_OK
             ):
                 accepted = True
+                # A disarm from here does not move the 0x1c change counter
+                # (seen live): force the next poll to re-read the status.
+                self._change_counter = None
             else:
                 logger.error("MG6250: %s refused, reply %s", command, reply.hex())
         return accepted

@@ -15,6 +15,7 @@ from paradox.hardware.mg6250.panel import (
     CLOCK_FIELD_POWER,
     CMD_DATA,
     CMD_IDENTIFY,
+    CMD_LOGIN,
     FIELD_LABEL,
     FIELD_SERIAL,
     KIND_ACK,
@@ -142,6 +143,24 @@ async def test_login_registers_panel_ack_handler_once():
         core.send_wait.side_effect = [None, None, Frame.parse(LOGIN_REPLY)]
         assert await panel.initialize_communication("admin") is True
     assert len(core.connection.handler_registry) == 1
+
+
+@pytest.mark.parametrize("status", [0x05, 0x85])
+async def test_login_busy_is_retryable(status):
+    """A session still open is not fatal: return False so PAI retries."""
+    core = AsyncMock()
+    reply = Frame.parse(build_frame(CMD_LOGIN, 2, bytes([status])))
+    core.send_wait.side_effect = [None, None, reply]
+    assert await Panel(core).initialize_communication("admin") is False
+
+
+@pytest.mark.parametrize("status", [0x81, 0x83, 0x84])
+async def test_login_refused_is_fatal(status):
+    core = AsyncMock()
+    reply = Frame.parse(build_frame(CMD_LOGIN, 2, bytes([status])))
+    core.send_wait.side_effect = [None, None, reply]
+    with pytest.raises(AuthenticationFailed):
+        await Panel(core).initialize_communication("admin")
 
 
 def test_decrypt_captured_data_frame():
@@ -589,6 +608,14 @@ async def test_arm_matches_capture():
 
     assert core.send_wait.call_args.kwargs["message"] == ARM_REQUEST
     core.connection.write.assert_called_once()  # ack of the panel's reply
+
+
+async def test_accepted_control_forces_status_reread():
+    """A disarm does not move the 0x1c counter: the next poll must re-read."""
+    panel, _ = control_panel()
+    panel._change_counter = 0x42
+    assert await panel.control_partitions([1], "disarm") is True
+    assert panel._change_counter is None
 
 
 @pytest.mark.parametrize(
